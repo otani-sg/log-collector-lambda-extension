@@ -1,7 +1,7 @@
-extern crate lambda_runtime_client;
 use aws_sdk_s3 as s3;
 use chrono::Utc;
 use enum_as_inner::EnumAsInner;
+use lambda_extension::{service_fn, Error, Extension, LambdaEvent, NextEvent};
 use parquet::basic::{Compression, Repetition};
 use parquet::column::writer::ColumnWriter;
 use parquet::data_type::ByteArray;
@@ -13,14 +13,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 use std::collections::HashMap;
 use std::env;
+use tokio::sync::broadcast::{self, Sender};
 // use std::fs::File;
 // use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tokio::signal;
 use uuid::Uuid;
 use warp::Filter;
-
-// use lambda_runtime_client::{EventContext, RuntimeClient};
 
 pub struct Config {
     pub port: u16,
@@ -83,11 +82,23 @@ async fn main() {
             return response;
         });
 
-    let (_addr, fut) =
-        warp::serve(endpoint).bind_with_graceful_shutdown(([127, 0, 0, 1], config.port), async move {
-            signal::ctrl_c().await.expect("failed to listen for event");
+    // One time channel to trigger server shutdown when receiving lambda shutdown event
+    let (lambda_shutdown_tx, mut lambda_shutdown_rx) = broadcast::channel::<String>(1);
 
-            println!("Caught Ctrl+C");
+    let (_addr, fut) = warp::serve(endpoint).bind_with_graceful_shutdown(
+        ([127, 0, 0, 1], config.port),
+        async move {
+            // Start shutdown procedure when either we receive SHUTDOWN event
+            // from AWS Lambda, or SIGTERM signal when testing locally
+            tokio::select! {
+                val = lambda_shutdown_rx.recv() => {
+                    println!("Caught shutdown event from Lambda Runtime: {:?}", val);
+                },
+                _ = signal::ctrl_c() => {
+                    println!("Caught Ctrl+C");
+                }
+            };
+
             let parquets = to_parquets(g_entries);
 
             // Upload to S3
@@ -99,18 +110,55 @@ async fn main() {
                 full_path = format!("{}/{}", config.s3_bucket_prefix, s3_path);
                 full_path = match full_path.strip_prefix("/") {
                     Some(stripped) => stripped.to_string(),
-                    None => full_path
+                    None => full_path,
                 };
-                
+
                 client
                     .put_object()
                     .bucket(config.s3_bucket.to_owned())
                     .body(ByteStream::from(parquet))
                     .key(full_path)
-                    .send().await.unwrap();
+                    .send()
+                    .await
+                    .unwrap();
             }
-        });
+        },
+    );
+
+    tokio::spawn(register_lambda_shutdown_event(lambda_shutdown_tx.clone()));
+
     fut.await
+}
+
+async fn register_lambda_shutdown_event(lambda_shutdown_tx: Sender<String>) {
+    // Only run this block on lambda environment
+    match env::var("AWS_LAMBDA_RUNTIME_API") {
+        Ok(_) => {}
+        Err(_) => return,
+    }
+    let guarded_tx = Arc::new(Mutex::new(lambda_shutdown_tx));
+
+    // A handler that simply send shutdown signal
+    let events_processor = service_fn(|request: LambdaEvent| {
+        let cloned_tx = guarded_tx.clone();
+        println!("{:?}", request.next);
+        async move {
+            match request.next {
+                NextEvent::Shutdown(event) => {
+                    cloned_tx.clone().lock().unwrap().send(event.shutdown_reason).unwrap();
+                }
+                NextEvent::Invoke(_) => {}
+            }
+            Ok::<(), Error>(())
+        }
+    });
+
+    // Register for the shutdown event with above handler
+    let extension = Extension::new()
+        .with_events(&["SHUTDOWN"])
+        .with_events_processor(events_processor);
+
+    extension.run().await.unwrap()
 }
 
 fn to_parquets(entries: LogEntries) -> HashMap<String, Vec<u8>> {
