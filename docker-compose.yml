@@ -1,0 +1,9 @@
+services:
+  dev:
+    build: .
+    network_mode: host
+    working_dir: /src
+    volumes:
+    - .:/src
+    user: "${COMPOSE_UID:-1000}:${COMPOSE_GID:-1000}"
+    command: ['bash']
