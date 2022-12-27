@@ -8,7 +8,7 @@ use parquet::data_type::ByteArray;
 use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
 // use parquet::schema::printer::print_schema;
-use s3::types::ByteStream;
+use s3::types::{ByteStream, DisplayErrorContext};
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 use std::collections::HashMap;
@@ -113,14 +113,21 @@ async fn main() {
                     None => full_path,
                 };
 
-                client
+                match client
                     .put_object()
                     .bucket(config.s3_bucket.to_owned())
                     .body(ByteStream::from(parquet))
-                    .key(full_path)
+                    .key(full_path.to_string())
                     .send()
                     .await
-                    .unwrap();
+                {
+                    Ok(_) => {}
+                    Err(err) => println!(
+                        "Could not write to {}: {}",
+                        full_path,
+                        DisplayErrorContext(err)
+                    ),
+                };
             }
         },
     );
@@ -141,11 +148,15 @@ async fn register_lambda_shutdown_event(lambda_shutdown_tx: Sender<String>) {
     // A handler that simply send shutdown signal
     let events_processor = service_fn(|request: LambdaEvent| {
         let cloned_tx = guarded_tx.clone();
-        println!("{:?}", request.next);
         async move {
             match request.next {
                 NextEvent::Shutdown(event) => {
-                    cloned_tx.clone().lock().unwrap().send(event.shutdown_reason).unwrap();
+                    cloned_tx
+                        .clone()
+                        .lock()
+                        .unwrap()
+                        .send(event.shutdown_reason)
+                        .unwrap();
                 }
                 NextEvent::Invoke(_) => {}
             }
@@ -161,6 +172,8 @@ async fn register_lambda_shutdown_event(lambda_shutdown_tx: Sender<String>) {
     extension.run().await.unwrap()
 }
 
+/// Write log entries into potentially multiple parquet buffers, where the key
+/// for each buffer is where to write it on S3
 fn to_parquets(entries: LogEntries) -> HashMap<String, Vec<u8>> {
     let _entries = &*entries.lock().unwrap();
     if _entries.len() == 0 {
@@ -178,7 +191,6 @@ fn to_parquets(entries: LogEntries) -> HashMap<String, Vec<u8>> {
     // print_schema(&mut schema_buffer, &schema);
     // println!("{}", String::from_utf8(schema_buffer).unwrap());
 
-    // TODO Group entries by timestamp
     let entry_groups = group_by_timestamp(_entries);
 
     let mut parquet_groups = HashMap::new();
@@ -202,6 +214,7 @@ fn to_parquets(entries: LogEntries) -> HashMap<String, Vec<u8>> {
     parquet_groups
 }
 
+/// Infer parquet schema from keys of a log entry
 fn build_schema(entry: &LogEntry) -> parquet::schema::types::Type {
     let mut fields = Vec::new();
 
@@ -228,6 +241,7 @@ fn build_schema(entry: &LogEntry) -> parquet::schema::types::Type {
         .unwrap()
 }
 
+/// Write list of log entries, using defined schema into parquet-formatted buffer
 fn to_parquet(schema: &parquet::schema::types::Type, entries: &Vec<&LogEntry>) -> Vec<u8> {
     let mut buffer = Vec::<u8>::new();
 
@@ -308,6 +322,7 @@ fn group_by_timestamp(entries: &Vec<LogEntry>) -> HashMap<String, Vec<&LogEntry>
         let mut split = timestamp.split("T");
         let date = split.next().unwrap();
         let hour = &split.next().unwrap()[..2];
+        // The format of the key allow automatic partitioning for amazon athena
         let group_key = format!("date={}/hour={}", date, hour);
 
         match entry_groups.get_mut(&group_key) {
