@@ -23,7 +23,7 @@ use warp::Filter;
 // use lambda_runtime_client::{EventContext, RuntimeClient};
 
 pub struct Config {
-    pub port: i16,
+    pub port: u16,
     pub s3_bucket: String,
     pub s3_bucket_prefix: String,
 }
@@ -32,7 +32,7 @@ impl Config {
     pub fn build() -> Result<Config, &'static str> {
         let port = env::var("LOG_COLLECTOR_LAMBDA_EXT_PORT")
             .unwrap_or("3030".to_owned())
-            .parse::<i16>()
+            .parse::<u16>()
             .expect("LOG_COLLECTOR_LAMBDA_EXT_PORT environment variable is invalid");
 
         let s3_bucket = env::var("LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET")
@@ -84,7 +84,7 @@ async fn main() {
         });
 
     let (_addr, fut) =
-        warp::serve(endpoint).bind_with_graceful_shutdown(([127, 0, 0, 1], 3030), async move {
+        warp::serve(endpoint).bind_with_graceful_shutdown(([127, 0, 0, 1], config.port), async move {
             signal::ctrl_c().await.expect("failed to listen for event");
 
             println!("Caught Ctrl+C");
