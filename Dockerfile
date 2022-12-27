@@ -1,6 +1,6 @@
 FROM amazonlinux:2
 
-RUN yum install -y shadow-utils gcc && rm -rf /var/cache/yum/* && yum clean all
+RUN yum install -y shadow-utils gcc zip && rm -rf /var/cache/yum/* && yum clean all
 RUN useradd --create-home --shell /bin/bash dev
 USER dev
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh /dev/stdin -y
