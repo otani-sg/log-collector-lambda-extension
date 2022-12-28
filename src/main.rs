@@ -114,10 +114,10 @@ async fn main() {
             // from AWS Lambda, or SIGTERM signal when testing locally
             tokio::select! {
                 val = lambda_shutdown_rx.recv() => {
-                    println!("Caught shutdown event from Lambda Runtime: {:?}", val);
+                    info!("Caught SHUTDOWN event from Lambda Runtime: {:?}", val);
                 },
                 _ = signal::ctrl_c() => {
-                    println!("Caught Ctrl+C");
+                    info!("Caught Ctrl+C");
                 }
             };
 
