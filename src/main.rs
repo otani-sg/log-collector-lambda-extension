@@ -31,20 +31,20 @@ pub struct Config {
 
 impl Config {
     pub fn build() -> Result<Config, &'static str> {
-        let port = env::var("LOG_COLLECTOR_LAMBDA_EXT_PORT")
+        let port = env::var("LCLE_PORT")
             .unwrap_or("3030".to_owned())
             .parse::<u16>()
-            .expect("LOG_COLLECTOR_LAMBDA_EXT_PORT environment variable is invalid");
+            .expect("LCLE_PORT environment variable is invalid");
 
-        let s3_bucket = match env::var("LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET") {
+        let s3_bucket = match env::var("LCLE_S3_BUCKET") {
             Ok(s3_bucket) => s3_bucket,
             Err(_) => {
-                warn!("LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET is not set. The extension will only collect logs but don't know where to store them.");
+                warn!("LCLE_S3_BUCKET is not set. The extension will only collect logs but don't know where to store them.");
                 "".to_owned()
             }
         };
         let s3_bucket_prefix =
-            env::var("LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET_PREFIX").unwrap_or("".to_owned());
+            env::var("LCLE_S3_BUCKET_PREFIX").unwrap_or("".to_owned());
 
         Ok(Config {
             port,
@@ -122,7 +122,7 @@ async fn main() {
 async fn flush_to_files(config: Config, entries: LogEntries) {
     let parquets = to_parquets(entries);
 
-    // Intialize S3 client if LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET is set
+    // Intialize S3 client if LCLE_S3_BUCKET is set
     let mut client: Option<s3::Client> = None;
     if config.s3_bucket.len() > 0 {
         let aws_config = aws_config::load_from_env().await;
@@ -166,7 +166,7 @@ async fn flush_to_files(config: Config, entries: LogEntries) {
             }
             None => {
                 debug!(
-                    "Logs would have been written to s3://<LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET>/{}",
+                    "Logs would have been written to s3://<LCLE_S3_BUCKET>/{}",
                     full_path
                 )
             }
