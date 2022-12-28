@@ -1,8 +1,9 @@
 use aws_sdk_s3 as s3;
 use chrono::Utc;
 use enum_as_inner::EnumAsInner;
+use env_logger::Env;
 use lambda_extension::{service_fn, Error, Extension, LambdaEvent, NextEvent};
-use log::{debug, error, info, warn, log_enabled, Level};
+use log::{debug, error, info, log_enabled, warn, Level};
 use parquet::basic::{Compression, Repetition};
 use parquet::column::writer::ColumnWriter;
 use parquet::data_type::ByteArray;
@@ -13,20 +14,22 @@ use s3::types::{ByteStream, DisplayErrorContext};
 use serde::{Deserialize, Serialize};
 use serde_json::to_string;
 use std::collections::HashMap;
-use std::env;
-use tokio::sync::broadcast::{self, Sender};
-use warp::hyper::StatusCode;
-// use std::fs::File;
-// use std::io::Write;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::{env, fs};
 use tokio::signal;
+use tokio::sync::broadcast::{self, Sender};
 use uuid::Uuid;
+use warp::hyper::StatusCode;
 use warp::Filter;
 
 pub struct Config {
     pub port: u16,
     pub s3_bucket: String,
     pub s3_bucket_prefix: String,
+    pub write_local_dir: String,
 }
 
 impl Config {
@@ -36,20 +39,27 @@ impl Config {
             .parse::<u16>()
             .expect("LCLE_PORT environment variable is invalid");
 
+        let write_local_dir = env::var("LCLE_WRITE_LOCAL_DIR").unwrap_or("".to_owned());
+
         let s3_bucket = match env::var("LCLE_S3_BUCKET") {
             Ok(s3_bucket) => s3_bucket,
-            Err(_) => {
-                warn!("LCLE_S3_BUCKET is not set. The extension will only collect logs but don't know where to store them.");
-                "".to_owned()
-            }
+            Err(_) => "".to_owned(),
         };
-        let s3_bucket_prefix =
-            env::var("LCLE_S3_BUCKET_PREFIX").unwrap_or("".to_owned());
+
+        if write_local_dir.len() == 0 && s3_bucket.len() == 0 {
+            warn!(
+                "The extension will only collect logs but don't know where to store them. \
+            Set LCLE_S3_BUCKET to write to S3, or LCLE_WRITE_LOCAL_DIR to write locally."
+            );
+        }
+
+        let s3_bucket_prefix = env::var("LCLE_S3_BUCKET_PREFIX").unwrap_or("".to_owned());
 
         Ok(Config {
             port,
             s3_bucket,
             s3_bucket_prefix,
+            write_local_dir,
         })
     }
 }
@@ -79,7 +89,7 @@ async fn main() {
     let entries: LogEntries = Arc::new(Mutex::new(Vec::new()));
     let g_entries = entries.clone();
 
-    // POST / Receive json body
+    // POST /collect Receive json body
     let endpoint = warp::path("collect")
         .and(warp::path::end())
         .and(warp::post())
@@ -119,6 +129,7 @@ async fn main() {
 
     tokio::spawn(register_lambda_shutdown_event(lambda_shutdown_tx.clone()));
 
+    info!("Log collector is now available at http://{}/collect", _addr);
     fut.await
 }
 
@@ -141,10 +152,13 @@ async fn flush_to_files(config: Config, entries: LogEntries) {
             None => full_path,
         };
 
-        // Write to file for debugging
-        // let out_path = "./test.parquet";
-        // let mut out_file = File::create(&out_path).unwrap();
-        // out_file.write_all(&buffer).unwrap();
+        if config.write_local_dir.len() > 0 {
+            let local_path = Path::new(&config.write_local_dir).join(full_path.to_string());
+            fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+            let mut out_file = File::create(&local_path).unwrap();
+            out_file.write_all(&parquet).unwrap();
+            info!("Logs written to {}", local_path.to_str().unwrap());
+        }
 
         match client {
             Some(ref client) => {
@@ -236,7 +250,10 @@ fn to_parquets(entries: LogEntries) -> HashMap<String, Vec<u8>> {
     if log_enabled!(Level::Debug) {
         let mut schema_buffer = Vec::new();
         print_schema(&mut schema_buffer, &schema);
-        debug!("Detected schema: {}", String::from_utf8(schema_buffer).unwrap());
+        debug!(
+            "Detected schema: {}",
+            String::from_utf8(schema_buffer).unwrap()
+        );
     }
 
     let entry_groups = group_by_timestamp(_entries);
