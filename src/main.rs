@@ -10,10 +10,11 @@ use parquet::file::writer::SerializedFileWriter;
 // use parquet::schema::printer::print_schema;
 use s3::types::{ByteStream, DisplayErrorContext};
 use serde::{Deserialize, Serialize};
-use serde_json::to_string;
+// use serde_json::to_string;
 use std::collections::HashMap;
 use std::env;
 use tokio::sync::broadcast::{self, Sender};
+use warp::hyper::StatusCode;
 // use std::fs::File;
 // use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -69,6 +70,7 @@ async fn main() {
 
     // POST / Receive json body
     let endpoint = warp::path("collect")
+        .and(warp::path::end())
         .and(warp::post())
         .and(warp::body::json())
         .and(warp::any().map(move || entries.clone()))
@@ -77,9 +79,10 @@ async fn main() {
             let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
             body.insert("_timestamp".to_owned(), PrimaryValue::String(ts));
 
-            let response = format!("Got a JSON body: {}!", to_string(&body).unwrap());
+            // let response = format!("Got a JSON body: {}!", to_string(&body).unwrap());
             entries.lock().unwrap().push(body);
-            return response;
+            // return response;
+            StatusCode::ACCEPTED
         });
 
     // One time channel to trigger server shutdown when receiving lambda shutdown event
