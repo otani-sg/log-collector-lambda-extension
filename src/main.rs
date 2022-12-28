@@ -2,15 +2,16 @@ use aws_sdk_s3 as s3;
 use chrono::Utc;
 use enum_as_inner::EnumAsInner;
 use lambda_extension::{service_fn, Error, Extension, LambdaEvent, NextEvent};
+use log::{debug, error, info, warn, log_enabled, Level};
 use parquet::basic::{Compression, Repetition};
 use parquet::column::writer::ColumnWriter;
 use parquet::data_type::ByteArray;
 use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
-// use parquet::schema::printer::print_schema;
+use parquet::schema::printer::print_schema;
 use s3::types::{ByteStream, DisplayErrorContext};
 use serde::{Deserialize, Serialize};
-// use serde_json::to_string;
+use serde_json::to_string;
 use std::collections::HashMap;
 use std::env;
 use tokio::sync::broadcast::{self, Sender};
@@ -35,8 +36,13 @@ impl Config {
             .parse::<u16>()
             .expect("LOG_COLLECTOR_LAMBDA_EXT_PORT environment variable is invalid");
 
-        let s3_bucket = env::var("LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET")
-            .expect("LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET is not set");
+        let s3_bucket = match env::var("LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET") {
+            Ok(s3_bucket) => s3_bucket,
+            Err(_) => {
+                warn!("LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET is not set. The extension will only collect logs but don't know where to store them.");
+                "".to_owned()
+            }
+        };
         let s3_bucket_prefix =
             env::var("LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET_PREFIX").unwrap_or("".to_owned());
 
@@ -63,6 +69,8 @@ type LogEntries = Arc<Mutex<Vec<LogEntry>>>;
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
+
     let config = Config::build().unwrap();
 
     let entries: LogEntries = Arc::new(Mutex::new(Vec::new()));
@@ -102,7 +110,7 @@ async fn main() {
                 }
             };
 
-            collect_and_upload(config, g_entries).await
+            flush_to_files(config, g_entries).await
         },
     );
 
@@ -111,14 +119,18 @@ async fn main() {
     fut.await
 }
 
-async fn collect_and_upload(config: Config, entries: LogEntries) {
+async fn flush_to_files(config: Config, entries: LogEntries) {
     let parquets = to_parquets(entries);
 
-    // Upload to S3
-    let aws_config = aws_config::load_from_env().await;
-    let client = s3::Client::new(&aws_config);
+    // Intialize S3 client if LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET is set
+    let mut client: Option<s3::Client> = None;
+    if config.s3_bucket.len() > 0 {
+        let aws_config = aws_config::load_from_env().await;
+        client = Some(s3::Client::new(&aws_config));
+    }
     let mut full_path;
 
+    // Upload each file to S3
     for (s3_path, parquet) in parquets {
         full_path = format!("{}/{}", config.s3_bucket_prefix, s3_path);
         full_path = match full_path.strip_prefix("/") {
@@ -126,21 +138,39 @@ async fn collect_and_upload(config: Config, entries: LogEntries) {
             None => full_path,
         };
 
-        match client
-            .put_object()
-            .bucket(config.s3_bucket.to_owned())
-            .body(ByteStream::from(parquet))
-            .key(full_path.to_string())
-            .send()
-            .await
-        {
-            Ok(_) => {}
-            Err(err) => println!(
-                "Could not write to {}: {}",
-                full_path,
-                DisplayErrorContext(err)
-            ),
-        };
+        // Write to file for debugging
+        // let out_path = "./test.parquet";
+        // let mut out_file = File::create(&out_path).unwrap();
+        // out_file.write_all(&buffer).unwrap();
+
+        match client {
+            Some(ref client) => {
+                match client
+                    .put_object()
+                    .bucket(config.s3_bucket.to_owned())
+                    .body(ByteStream::from(parquet))
+                    .key(full_path.to_string())
+                    .send()
+                    .await
+                {
+                    Ok(_) => info!(
+                        "Logs written succesfully to s3://{}/{}",
+                        config.s3_bucket, full_path
+                    ),
+                    Err(err) => error!(
+                        "Could not write to {}: {}",
+                        full_path,
+                        DisplayErrorContext(err)
+                    ),
+                };
+            }
+            None => {
+                debug!(
+                    "Logs would have been written to s3://<LOG_COLLECTOR_LAMBDA_EXT_S3_BUCKET>/{}",
+                    full_path
+                )
+            }
+        }
     }
 }
 
@@ -188,15 +218,23 @@ fn to_parquets(entries: LogEntries) -> HashMap<String, Vec<u8>> {
     };
 
     // Debug entries
-    // eprintln!("{:?}", _entries);
+    if log_enabled!(Level::Debug) {
+        debug!(
+            "Number of entries: {}, first 5: {}",
+            _entries.len(),
+            to_string(&_entries.iter().take(5).collect::<Vec<&LogEntry>>()).unwrap()
+        );
+    }
 
     // Build schema from the first entry
     let schema = build_schema(&_entries[0]);
 
     // Debug schema
-    // let mut schema_buffer = Vec::new();
-    // print_schema(&mut schema_buffer, &schema);
-    // println!("{}", String::from_utf8(schema_buffer).unwrap());
+    if log_enabled!(Level::Debug) {
+        let mut schema_buffer = Vec::new();
+        print_schema(&mut schema_buffer, &schema);
+        debug!("Detected schema: {}", String::from_utf8(schema_buffer).unwrap());
+    }
 
     let entry_groups = group_by_timestamp(_entries);
 
@@ -205,11 +243,6 @@ fn to_parquets(entries: LogEntries) -> HashMap<String, Vec<u8>> {
     for (group_key, group_entries) in entry_groups {
         // Write entries into parquet-formatted buffer
         let buffer = to_parquet(&schema, &group_entries);
-
-        // Write to file for debugging
-        // let out_path = "./test.parquet";
-        // let mut out_file = File::create(&out_path).unwrap();
-        // out_file.write_all(&buffer).unwrap();
 
         let file_id = Uuid::new_v4().to_string();
         parquet_groups.insert(

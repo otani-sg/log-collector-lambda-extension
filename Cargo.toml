@@ -17,6 +17,8 @@ aws-config = "0.52.0"
 aws-sdk-s3 = "0.22.0"
 chrono = "0.4"
 uuid = { version = "1.2", features = ["v4"] }
+env_logger = "0.10"
+log = "0.4"
 
 [profile.release]
 lto = true          # Enable link-time optimization
