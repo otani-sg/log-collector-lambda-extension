@@ -100,9 +100,7 @@ async fn main() {
             let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
             body.insert("_timestamp".to_owned(), PrimaryValue::String(ts));
 
-            // let response = format!("Got a JSON body: {}!", to_string(&body).unwrap());
             entries.lock().unwrap().push(body);
-            // return response;
             StatusCode::ACCEPTED
         });
 
