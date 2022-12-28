@@ -69,7 +69,10 @@ type LogEntries = Arc<Mutex<Vec<LogEntry>>>;
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        Env::default().default_filter_or("log_collector_lambda_extension=info"),
+    )
+    .init();
 
     let config = Config::build().unwrap();
 
