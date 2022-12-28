@@ -102,42 +102,46 @@ async fn main() {
                 }
             };
 
-            let parquets = to_parquets(g_entries);
-
-            // Upload to S3
-            let aws_config = aws_config::load_from_env().await;
-            let client = s3::Client::new(&aws_config);
-            let mut full_path;
-
-            for (s3_path, parquet) in parquets {
-                full_path = format!("{}/{}", config.s3_bucket_prefix, s3_path);
-                full_path = match full_path.strip_prefix("/") {
-                    Some(stripped) => stripped.to_string(),
-                    None => full_path,
-                };
-
-                match client
-                    .put_object()
-                    .bucket(config.s3_bucket.to_owned())
-                    .body(ByteStream::from(parquet))
-                    .key(full_path.to_string())
-                    .send()
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(err) => println!(
-                        "Could not write to {}: {}",
-                        full_path,
-                        DisplayErrorContext(err)
-                    ),
-                };
-            }
+            collect_and_upload(config, g_entries).await
         },
     );
 
     tokio::spawn(register_lambda_shutdown_event(lambda_shutdown_tx.clone()));
 
     fut.await
+}
+
+async fn collect_and_upload(config: Config, entries: LogEntries) {
+    let parquets = to_parquets(entries);
+
+    // Upload to S3
+    let aws_config = aws_config::load_from_env().await;
+    let client = s3::Client::new(&aws_config);
+    let mut full_path;
+
+    for (s3_path, parquet) in parquets {
+        full_path = format!("{}/{}", config.s3_bucket_prefix, s3_path);
+        full_path = match full_path.strip_prefix("/") {
+            Some(stripped) => stripped.to_string(),
+            None => full_path,
+        };
+
+        match client
+            .put_object()
+            .bucket(config.s3_bucket.to_owned())
+            .body(ByteStream::from(parquet))
+            .key(full_path.to_string())
+            .send()
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => println!(
+                "Could not write to {}: {}",
+                full_path,
+                DisplayErrorContext(err)
+            ),
+        };
+    }
 }
 
 async fn register_lambda_shutdown_event(lambda_shutdown_tx: Sender<String>) {
