@@ -1,7 +1,14 @@
 Log Collector Lambda Extension
 =============
 
-This extension runs a local server to receive log entries from your lambda app, and batch write them into specified S3 bucket under parquet format. Logs in the log bucket can then be queried directly using Amazon Athena.
+This extension runs a local server to receive log entries from your lambda app, and batch write them into specified S3 bucket in parquet format. Logs in the log bucket can then be queried directly using Amazon Athena.
+
+## When to use?
+
+1. Mainly when you need to overcome 256kb event size hard-limit of Cloudwatch Logs, and don't want to run always-on server (Elasticsearch or Postgres) to store logs. Suitable for logging HTTP requests with full body for auditing purpose.
+
+2. Want to use familiar SQL syntax to query/transform logs, using Amazon Athena.
+
 
 ## How to build the extension
 
@@ -21,9 +28,9 @@ $ aws lambda add-layer-version-permission --layer-name <layer-name> --version-nu
 
 ## How to use and configure the extension
 
-When added as a layer to a function, the extension will start collecting log entries from JSON POST requests to **http://localhost:3030/collect**. Configure `LCLE_S3_BUCKET` to tell the extension where to store logs. The lambda function must have permission to write to the specified bucket.
+When added as a layer to a function, the extension will start collecting log entries from JSON POST requests to **http://localhost:3030/collect**. See note below for payload format. Set environment variable `LCLE_S3_BUCKET` to tell the extension where to store logs. The lambda function must have permission to write to the specified bucket.
 
-After logs are first written to the bucket (when AWS fully stops the container that run the Lambda function), you can start [setting-up Amazon Athena to read from the bucket](https://docs.aws.amazon.com/athena/latest/ug/data-sources-glue.html). 
+After logs are first written to the bucket (when AWS fully stops the container that powers the Lambda function, around 10-20 minutes after last execution), you can start [setting-up Amazon Athena to read from the bucket](https://docs.aws.amazon.com/athena/latest/ug/data-sources-glue.html). 
 
 **Notes:**
 
